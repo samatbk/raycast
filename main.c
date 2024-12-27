@@ -19,6 +19,9 @@
 #define SCREEN_WIDTH 640
 #define SCREEN_HEIGHT 480
 
+#define TEXTURE_WIDTH 16
+#define TEXTURE_HEIGHT 16
+
 #define MAP_WIDTH 10
 #define MAP_HEIGHT 10
 
@@ -63,6 +66,12 @@ typedef struct {
   f64 fov;
 } Player;
 
+typedef struct {
+  bool is_side;
+  bool hit;
+  f64 distance;
+} RayInfo;
+
 void init_sdl() {
   if (SDL_Init(SDL_INIT_VIDEO) < 0) {
     fprintf(stderr, "could not initialize sdl2: %s\n", SDL_GetError());
@@ -70,7 +79,9 @@ void init_sdl() {
   }
 }
 
-f64 cast_ray_dda(v2 pos, f64 angle, Map map) {
+RayInfo cast_ray_dda(v2 pos, f64 angle, Map map) {
+
+  RayInfo ray_info = {.distance = 0.0, .hit = false, .is_side = false};
 
   f64 tan_angle = (fabs(cos(angle)) > 1e-6) ? tan(angle) : 1e6;
   f64 cot_angle = (fabs(sin(angle)) > 1e-6) ? (1 / tan(angle)) : 1e6;
@@ -109,10 +120,12 @@ f64 cast_ray_dda(v2 pos, f64 angle, Map map) {
       map_check.x += step.x;
       distance = ray_length.x;
       ray_length.x += unit_step_size.x;
+      ray_info.is_side = false;
     } else {
       map_check.y += step.y;
       distance = ray_length.y;
       ray_length.y += unit_step_size.y;
+      ray_info.is_side = true;
     }
 
     v2i map_coords = {(int)floor(map_check.x), (int)floor(map_check.y)};
@@ -127,17 +140,19 @@ f64 cast_ray_dda(v2 pos, f64 angle, Map map) {
   }
 
   if (tile_found) {
-    return distance;
+    ray_info.distance = distance;
+    ray_info.hit = true;
   }
 
-  return -1;
+  return ray_info;
 }
 
 u32 rgba_color(u8 r, u8 g, u8 b, u8 a) {
   return SDL_MapRGBA(SDL_AllocFormat(SDL_PIXELFORMAT_RGBA8888), r, g, b, a);
 }
 
-void update_game(Player player, Map map, SDL_Texture *texture) {
+void update_game(Player player, Map map, u32 cool_texture[],
+                 SDL_Texture *texture) {
   u32 pixels[SCREEN_HEIGHT][SCREEN_WIDTH] = {0};
 
   f64 fov = player.fov;
@@ -154,29 +169,60 @@ void update_game(Player player, Map map, SDL_Texture *texture) {
   }
 
   for (i32 i = 0; i < ray_count; i++) {
-    f64 dist =
-        cast_ray_dda(player.pos, player.dir - (fov / 2) + i * angle_step, map);
-    if (dist == -1) {
+    f64 ray_dir = player.dir - (fov / 2) + i * angle_step;
+    RayInfo ray = cast_ray_dda(player.pos, ray_dir, map);
+    f64 dist = ray.distance;
+
+    if (!ray.hit) {
       continue;
     }
 
     i32 wall_width = SCREEN_WIDTH / ray_count;
-    i32 wall_height = 320.0f / dist;
+    i32 wall_height = SCREEN_HEIGHT / dist;
 
-    if (dist < 1.5f) {
-      dist = 1.5f;
-      wall_height = 320.0f / dist;
+    if (dist < 2.0) {
+      dist = 2.0;
+      wall_height = SCREEN_HEIGHT / dist;
     }
 
     u8 opacity = 255 - (dist * 30);
     u32 wall_color = rgba_color(0, opacity, 0, 255);
     u32 wall_color2 = rgba_color(opacity, 0, 0, 255);
 
+    f64 wall_x = 0;
+    if (ray.is_side) {
+      wall_x = player.pos.x + ray.distance * cos(ray_dir);
+    } else {
+      wall_x = player.pos.y + ray.distance * sin(ray_dir);
+    }
+
+    wall_x -= floor(wall_x);
+
+    u32 tex_x = (u32)(wall_x * (f64)TEXTURE_WIDTH);
+
+    f64 step = 1.0 * TEXTURE_HEIGHT / wall_height;
+    f64 tex_pos = 0;
+
     for (u32 j = SCREEN_HEIGHT / 2 - wall_height;
          j <= SCREEN_HEIGHT / 2 + wall_height; j++) {
       for (u32 k = wall_width * i; k <= wall_width * (i + 1); k++) {
 
-        pixels[j][k] = wall_color;
+        i32 tex_y = (i32)tex_pos & (TEXTURE_HEIGHT - 1);
+        tex_pos += step;
+
+        if (j < SCREEN_HEIGHT) {
+          u32 color = cool_texture[TEXTURE_WIDTH * tex_y + tex_x];
+          f64 darkness = 1.0 - dist * 0.15;
+          if (darkness < 0.1) {
+            darkness = 0.1;
+          }
+
+          u8 red = ((color >> 24) & 0xFF) * darkness;
+          u8 green = ((color >> 16) & 0xFF) * darkness;
+          u8 blue = ((color >> 8) & 0xFF) * darkness;
+
+          pixels[j][k] = (red << 24) + (green << 16) + (blue << 8) + 0xFF;
+        }
       }
     }
   }
@@ -198,9 +244,20 @@ int main(int argc, char *args[]) {
   SDL_Renderer *renderer =
       SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
 
+  u32 textures[1][TEXTURE_WIDTH * TEXTURE_HEIGHT];
+
+  for (int y = 0; y < TEXTURE_HEIGHT; y++) {
+    for (int x = 0; x < TEXTURE_WIDTH; x++) {
+      int xycolor = y * 128 / TEXTURE_HEIGHT + x * 128 / TEXTURE_WIDTH;
+
+      textures[0][x + y * TEXTURE_WIDTH] =
+          256 * xycolor + 65536 * xycolor + xycolor;
+    }
+  }
+
   Player player = (Player){.pos = (v2){.x = 4.0f, .y = 4.0f},
                            .dir = 0,
-                           .speed = 0.015f,
+                           .speed = 0.03f,
                            .fov = PI / 3};
 
   Game game = (Game){
@@ -271,19 +328,20 @@ int main(int argc, char *args[]) {
     SDL_RenderClear(renderer);
 
     if (should_update) {
-      f64 ray = cast_ray_dda(player.pos, player.dir, game.map);
-      f64 back_ray = cast_ray_dda(player.pos, player.dir + PI, game.map);
+      RayInfo ray = cast_ray_dda(player.pos, player.dir, game.map);
+      RayInfo back_ray = cast_ray_dda(player.pos, player.dir + PI, game.map);
 
       f64 tolerance = 1.15f;
-      if (moving_forward == 1 && ray != -1 && ray < tolerance) {
+      if (moving_forward == 1 && ray.hit && ray.distance < tolerance) {
         player.pos = old_player_pos;
       }
 
-      if (moving_forward == -1 && back_ray != -1 && back_ray < tolerance) {
+      if (moving_forward == -1 && back_ray.hit &&
+          back_ray.distance < tolerance) {
         player.pos = old_player_pos;
       }
 
-      update_game(player, game.map, screen_texture);
+      update_game(player, game.map, textures[0], screen_texture);
     }
 
     SDL_RenderCopy(renderer, screen_texture, NULL, NULL);
