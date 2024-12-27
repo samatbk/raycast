@@ -8,8 +8,10 @@
 #include <SDL2/SDL_rwops.h>
 #include <SDL2/SDL_stdinc.h>
 #include <SDL2/SDL_surface.h>
-
 #include <SDL2/SDL_timer.h>
+#include <SDL2/SDL_video.h>
+
+#include <assert.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -19,8 +21,8 @@
 #define SCREEN_WIDTH 640
 #define SCREEN_HEIGHT 480
 
-#define TEXTURE_WIDTH 16
-#define TEXTURE_HEIGHT 16
+#define TEXTURE_WIDTH 64
+#define TEXTURE_HEIGHT 64
 
 #define MAP_WIDTH 10
 #define MAP_HEIGHT 10
@@ -50,6 +52,7 @@ typedef struct {
 } v2i;
 
 typedef u32 Map[MAP_HEIGHT][MAP_WIDTH];
+typedef u32 Texture[TEXTURE_HEIGHT * TEXTURE_WIDTH];
 
 typedef enum { EMPTY_PLACE, WALL } map_info;
 
@@ -70,6 +73,7 @@ typedef struct {
   bool is_side;
   bool hit;
   f64 distance;
+  u32 wall_type;
 } RayInfo;
 
 void init_sdl() {
@@ -81,7 +85,8 @@ void init_sdl() {
 
 RayInfo cast_ray_dda(v2 pos, f64 angle, Map map) {
 
-  RayInfo ray_info = {.distance = 0.0, .hit = false, .is_side = false};
+  RayInfo ray_info = {
+      .distance = 0.0, .hit = false, .is_side = false, .wall_type = 0};
 
   f64 tan_angle = (fabs(cos(angle)) > 1e-6) ? tan(angle) : 1e6;
   f64 cot_angle = (fabs(sin(angle)) > 1e-6) ? (1 / tan(angle)) : 1e6;
@@ -133,8 +138,9 @@ RayInfo cast_ray_dda(v2 pos, f64 angle, Map map) {
     if (map_coords.x >= 0 && map_coords.x < MAP_WIDTH && map_coords.y >= 0 &&
         map_coords.y < MAP_HEIGHT) {
 
-      if (map[map_coords.y][map_coords.x] == WALL) {
+      if (map[map_coords.y][map_coords.x] != 0) {
         tile_found = true;
+        ray_info.wall_type = map[map_coords.y][map_coords.x];
       }
     }
   }
@@ -151,12 +157,12 @@ u32 rgba_color(u8 r, u8 g, u8 b, u8 a) {
   return SDL_MapRGBA(SDL_AllocFormat(SDL_PIXELFORMAT_RGBA8888), r, g, b, a);
 }
 
-void update_game(Player player, Map map, u32 cool_texture[],
+void update_game(Player player, Map map, Texture textures[],
                  SDL_Texture *texture) {
   u32 pixels[SCREEN_HEIGHT][SCREEN_WIDTH] = {0};
 
   f64 fov = player.fov;
-  i32 ray_count = 160;
+  i32 ray_count = 320;
   f64 angle_step = fov / ray_count;
 
   u32 floor_color = rgba_color(40, 40, 40, 255);
@@ -185,10 +191,6 @@ void update_game(Player player, Map map, u32 cool_texture[],
       wall_height = SCREEN_HEIGHT / dist;
     }
 
-    u8 opacity = 255 - (dist * 30);
-    u32 wall_color = rgba_color(0, opacity, 0, 255);
-    u32 wall_color2 = rgba_color(opacity, 0, 0, 255);
-
     f64 wall_x = 0;
     if (ray.is_side) {
       wall_x = player.pos.x + ray.distance * cos(ray_dir);
@@ -199,8 +201,18 @@ void update_game(Player player, Map map, u32 cool_texture[],
     wall_x -= floor(wall_x);
 
     u32 tex_x = (u32)(wall_x * (f64)TEXTURE_WIDTH);
+    tex_x = tex_x % TEXTURE_WIDTH;
 
-    f64 step = 1.0 * TEXTURE_HEIGHT / wall_height;
+    if (!ray.is_side && cos(ray_dir) > 0) {
+      tex_x = TEXTURE_WIDTH - tex_x - 1;
+    }
+
+    if (ray.is_side && sin(ray_dir) < 0) {
+      tex_x = TEXTURE_WIDTH - tex_x - 1;
+    }
+
+    /* u32 tex_x = 0; */
+    f64 step = (f64)TEXTURE_HEIGHT / wall_height;
     f64 tex_pos = 0;
 
     for (u32 j = SCREEN_HEIGHT / 2 - wall_height;
@@ -208,10 +220,17 @@ void update_game(Player player, Map map, u32 cool_texture[],
       for (u32 k = wall_width * i; k <= wall_width * (i + 1); k++) {
 
         i32 tex_y = (i32)tex_pos & (TEXTURE_HEIGHT - 1);
-        tex_pos += step;
+        tex_y = tex_y % (TEXTURE_HEIGHT - 1);
+        tex_pos += step / 16;
 
+        if (tex_y >= TEXTURE_HEIGHT) {
+          tex_y = TEXTURE_HEIGHT - 1;
+        }
         if (j < SCREEN_HEIGHT) {
-          u32 color = cool_texture[TEXTURE_WIDTH * tex_y + tex_x];
+          /* u32 color = */
+          /*     textures[ray.wall_type - 1][TEXTURE_WIDTH * tex_y + tex_x]; */
+          u32 color = textures[ray.wall_type - 1]
+                              [TEXTURE_WIDTH * tex_y + (tex_x / wall_width)];
           f64 darkness = 1.0 - dist * 0.15;
           if (darkness < 0.1) {
             darkness = 0.1;
@@ -221,6 +240,7 @@ void update_game(Player player, Map map, u32 cool_texture[],
           u8 green = ((color >> 16) & 0xFF) * darkness;
           u8 blue = ((color >> 8) & 0xFF) * darkness;
 
+          /* pixels[j][k] = color; */
           pixels[j][k] = (red << 24) + (green << 16) + (blue << 8) + 0xFF;
         }
       }
@@ -231,9 +251,10 @@ void update_game(Player player, Map map, u32 cool_texture[],
 }
 
 int main(int argc, char *args[]) {
-  SDL_Window *window = SDL_CreateWindow("raycaster", SDL_WINDOWPOS_UNDEFINED,
-                                        SDL_WINDOWPOS_UNDEFINED, SCREEN_WIDTH,
-                                        SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
+  SDL_Window *window = SDL_CreateWindow(
+      "raycaster", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+      SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+
   if (window == NULL) {
     fprintf(stderr, "could not create window: %s\n", SDL_GetError());
     return 1;
@@ -244,16 +265,32 @@ int main(int argc, char *args[]) {
   SDL_Renderer *renderer =
       SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
 
-  u32 textures[1][TEXTURE_WIDTH * TEXTURE_HEIGHT];
+  u32 textures[8][TEXTURE_WIDTH * TEXTURE_HEIGHT];
+
+  SDL_Surface *surface = SDL_LoadBMP("wolftextures.bmp");
+  SDL_Surface *rgba_surface =
+      SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA8888, 0);
 
   for (int y = 0; y < TEXTURE_HEIGHT; y++) {
-    for (int x = 0; x < TEXTURE_WIDTH; x++) {
-      int xycolor = y * 128 / TEXTURE_HEIGHT + x * 128 / TEXTURE_WIDTH;
+    u32 *pixels = (u32 *)rgba_surface->pixels;
 
-      textures[0][x + y * TEXTURE_WIDTH] =
-          256 * xycolor + 65536 * xycolor + xycolor;
+    for (int j = 0; j < 8; j++) {
+      for (int x = 0; x < TEXTURE_WIDTH; x++) {
+        int bmp_x = j * TEXTURE_WIDTH + x;
+        int bmp_index = bmp_x + y * 512;
+
+        textures[j][x + y * TEXTURE_WIDTH] = pixels[bmp_index];
+      }
     }
   }
+
+  /* for (int y = 0; y < TEXTURE_HEIGHT; y++) { */
+  /*   for (int x = 0; x < TEXTURE_WIDTH; x++) { */
+  /*     textures[0][x + y * TEXTURE_WIDTH] = (x % 2 == y % 2) * 0xFFFFFFF; */
+  /*   } */
+  /* } */
+  SDL_FreeSurface(surface);
+  SDL_FreeSurface(rgba_surface);
 
   Player player = (Player){.pos = (v2){.x = 4.0f, .y = 4.0f},
                            .dir = 0,
@@ -265,13 +302,13 @@ int main(int argc, char *args[]) {
       .pixels = {0},
       .map = {{1, 1, 1, 1, 1, 1, 1, 0, 0, 0},
               {1, 0, 1, 0, 1, 0, 1, 1, 1, 1},
-              {1, 0, 0, 0, 0, 0, 0, 1, 1, 1},
-              {1, 0, 0, 0, 0, 0, 0, 0, 1, 1},
-              {1, 1, 0, 0, 0, 0, 0, 0, 1, 1},
-              {1, 0, 0, 1, 1, 1, 1, 0, 1, 1},
-              {1, 0, 0, 0, 0, 0, 1, 0, 1, 0},
-              {1, 0, 0, 0, 1, 1, 1, 0, 1, 0},
-              {1, 0, 0, 0, 0, 0, 0, 0, 1, 0},
+              {1, 0, 0, 0, 0, 0, 0, 1, 2, 1},
+              {1, 0, 0, 0, 0, 0, 0, 0, 3, 1},
+              {1, 1, 0, 0, 0, 0, 0, 0, 4, 1},
+              {1, 0, 0, 1, 1, 1, 1, 0, 5, 1},
+              {1, 0, 0, 0, 0, 0, 1, 0, 6, 0},
+              {1, 0, 0, 0, 1, 1, 1, 0, 7, 0},
+              {1, 0, 0, 0, 0, 0, 0, 0, 8, 0},
               {1, 1, 1, 1, 1, 1, 1, 1, 1, 0}},
   };
 
@@ -300,6 +337,13 @@ int main(int argc, char *args[]) {
       if (event.type == SDL_QUIT) {
         game.is_running = false;
         break;
+      }
+
+      if (event.type == SDL_KEYDOWN) {
+        if (event.key.keysym.scancode == SDL_SCANCODE_F) {
+
+          SDL_SetRelativeMouseMode(!SDL_GetRelativeMouseMode());
+        }
       }
     }
 
@@ -331,7 +375,7 @@ int main(int argc, char *args[]) {
       RayInfo ray = cast_ray_dda(player.pos, player.dir, game.map);
       RayInfo back_ray = cast_ray_dda(player.pos, player.dir + PI, game.map);
 
-      f64 tolerance = 1.15f;
+      f64 tolerance = 1.20f;
       if (moving_forward == 1 && ray.hit && ray.distance < tolerance) {
         player.pos = old_player_pos;
       }
